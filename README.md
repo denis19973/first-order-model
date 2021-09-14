@@ -160,6 +160,13 @@ We recommend the later, for each video make a separate folder with all the frame
 
 3) Create a config ```config/dataset_name.yaml```, in dataset_params specify the root dir the ```root_dir:  data/dataset_name```. Also adjust the number of epoch in train_params.
 
+## Running with virtual camera
+```
+sudo modprobe v4l2loopback card_label="My Fake Webcam" exclusive_caps=1
+modprobe v4l2loopback devices=1
+```
+```python demo_cat_zoom.py --config config/vox-256.yaml --checkpoint ./checkpoints/vox-cpk.pth.tar --relative --adapt_scale```
+
 #### Additional notes
 
 Citation:
