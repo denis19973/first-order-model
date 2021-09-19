@@ -1,14 +1,10 @@
-import json
-
-import matplotlib
-
-matplotlib.use('Agg')
 import os, sys
 import yaml
 from argparse import ArgumentParser
 from tqdm import tqdm
 
 import imageio
+# imageio.plugins.ffmpeg.download()
 import numpy as np
 from skimage.transform import resize
 from skimage import img_as_ubyte
@@ -19,6 +15,7 @@ from modules.generator import OcclusionAwareGenerator
 from modules.keypoint_detector import KPDetector
 from animate import normalize_kp
 from scipy.spatial import ConvexHull
+from cats_keypoints_detector.predict import predict_kps
 
 if sys.version_info[0] < 3:
     raise Exception("You must use Python 3 or higher. Recommended version is Python 3.7")
@@ -68,44 +65,14 @@ def make_animation(source_image, driving_video, generator, kp_detector, relative
 
         kp_driving_initial = kp_detector(driving[:, :, 0])
 
-        # ########################### VISUALIZATION
         image = np.copy(source[0].permute(1, 2, 0).cpu().numpy())
-        # image = np.copy(driving[0, :, 0].squeeze(1).permute(1, 2, 0).cpu().numpy())
         spatial_size = np.array(image.shape[:2][::-1])[np.newaxis]
 
-        from skimage.draw import circle
-        from matplotlib import pyplot as plt
-
-        kp_array = kp_source['value'][0].cpu().numpy()
-        # kp_array = kp_driving_initial['value'][0].cpu().numpy()
-        kp_array = spatial_size * (kp_array + 1) / 2
-
-        colormap = plt.get_cmap('gist_rainbow')
-
-        with open('./animal_kps/keypoints.json') as f:
-            kps_dict = json.load(f)
-
-        kp_array = kps_dict[os.path.basename(opt.source_image)]
-
-        # kp_array[0], kp_array[8] = kp_array[8], kp_array[0]
-        # kp_array[6], kp_array[2] = kp_array[2], kp_array[6]
-        # kp_array[7], kp_array[1] = kp_array[1], kp_array[7]
-        # kp_array[3], kp_array[5] = kp_array[5], kp_array[3]
-
-        kp_array = np.array(kp_array)
-        # print(kp_array)
-        value = ((kp_array * 2) / spatial_size) - 1
-        kp_source['value'][0] = torch.from_numpy(value).cuda()
-
-        num_kp = kp_array.shape[0]
-        for kp_ind, kp in enumerate(kp_array):
-            rr, cc = circle(kp[1], kp[0], 5, shape=image.shape[:2])
-            image[rr, cc] = np.array(colormap(kp_ind / num_kp))[:3]
-
-        plt.imshow((image * 255).astype(np.uint8))
-        plt.show()
-
-        # #################################### END
+        kp_array = predict_kps(source_image, cpu)
+        kp_array = ((kp_array * 2) / spatial_size) - 1
+        kp_source['value'][0] = kp_array
+        if not cpu:
+            kp_source['value'][0] = kp_source['value'][0].cuda()
 
         for frame_idx in tqdm(range(driving.shape[2])):
             driving_frame = driving[:, :, frame_idx]
@@ -121,32 +88,6 @@ def make_animation(source_image, driving_video, generator, kp_detector, relative
     return predictions
 
 
-def find_best_frame(source, driving, cpu=False):
-    import face_alignment
-
-    def normalize_kp(kp):
-        kp = kp - kp.mean(axis=0, keepdims=True)
-        area = ConvexHull(kp[:, :2]).volume
-        area = np.sqrt(area)
-        kp[:, :2] = kp[:, :2] / area
-        return kp
-
-    fa = face_alignment.FaceAlignment(face_alignment.LandmarksType._2D, flip_input=True,
-                                      device='cpu' if cpu else 'cuda')
-    kp_source = fa.get_landmarks(255 * source)[0]
-    kp_source = normalize_kp(kp_source)
-    norm = float('inf')
-    frame_num = 0
-    for i, image in tqdm(enumerate(driving)):
-        kp_driving = fa.get_landmarks(255 * image)[0]
-        kp_driving = normalize_kp(kp_driving)
-        new_norm = (np.abs(kp_source - kp_driving) ** 2).sum()
-        if new_norm < norm:
-            norm = new_norm
-            frame_num = i
-    return frame_num
-
-
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--config", required=True, help="path to config")
@@ -160,12 +101,6 @@ if __name__ == "__main__":
                         help="use relative or absolute keypoint coordinates")
     parser.add_argument("--adapt_scale", dest="adapt_scale", action="store_true",
                         help="adapt movement scale based on convex hull of keypoints")
-
-    parser.add_argument("--find_best_frame", dest="find_best_frame", action="store_true",
-                        help="Generate from the frame that is the most alligned with source. (Only for faces, requires face_aligment lib)")
-
-    parser.add_argument("--best_frame", dest="best_frame", type=int, default=None,
-                        help="Set frame to start from.")
 
     parser.add_argument("--cpu", dest="cpu", action="store_true", help="cpu mode.")
 
@@ -189,17 +124,6 @@ if __name__ == "__main__":
     driving_video = [resize(frame, (256, 256))[..., :3] for frame in driving_video]
     generator, kp_detector = load_checkpoints(config_path=opt.config, checkpoint_path=opt.checkpoint, cpu=opt.cpu)
 
-    if opt.find_best_frame or opt.best_frame is not None:
-        i = opt.best_frame if opt.best_frame is not None else find_best_frame(source_image, driving_video, cpu=opt.cpu)
-        print("Best frame: " + str(i))
-        driving_forward = driving_video[i:]
-        driving_backward = driving_video[:(i + 1)][::-1]
-        predictions_forward = make_animation(source_image, driving_forward, generator, kp_detector,
-                                             relative=opt.relative, adapt_movement_scale=opt.adapt_scale, cpu=opt.cpu)
-        predictions_backward = make_animation(source_image, driving_backward, generator, kp_detector,
-                                              relative=opt.relative, adapt_movement_scale=opt.adapt_scale, cpu=opt.cpu)
-        predictions = predictions_backward[::-1] + predictions_forward[1:]
-    else:
-        predictions = make_animation(source_image, driving_video, generator, kp_detector, relative=opt.relative,
+    predictions = make_animation(source_image, driving_video, generator, kp_detector, relative=opt.relative,
                                      adapt_movement_scale=opt.adapt_scale, cpu=opt.cpu)
     imageio.mimsave(opt.result_video, [img_as_ubyte(frame) for frame in predictions], fps=fps)
